@@ -1,113 +1,89 @@
-# pages/07_Regeneration_Analysis.py
+# pages/08_Regeneration_Resistor.py
 
 import streamlit as st
-from streamlit_echarts import st_echarts
+import math
+from utils import sidebar_inputs, core_calcs, trapezoid_times  # <-- reuse your functions
 
-st.set_page_config(page_title="Regeneration Power Analysis", layout="wide")
+st.set_page_config(page_title="Regeneration Resistor Sizing", layout="wide")
 
-st.title("⚡ Regeneration Power Analysis")
+st.title("⚡ Regeneration Resistor Sizing")
 st.write("""
-This tool calculates and visualizes regenerative braking power for your linear axis motion profile.
-It compares **1:1 direct drive** vs. **2:1 reducer**.
+This tool estimates whether you need an **external regeneration resistor** based on your 
+motion profile and axis parameters. It compares **average regen power** and **peak power**
+to your drive’s internal resistor capacity.
 """)
 
-# ------------------------
-# Constants from your project
-# ------------------------
-brake_time = 0.15     # [s] braking duration
-cycle_time = 18.5     # [s] full cycle with dwell
-n_stops = 20          # 5× super-cycle with 4 stops each
+# --------------------------------------
+# Shared inputs
+# --------------------------------------
+params = sidebar_inputs()
+calcs = core_calcs(params)
 
-# energies per stop [J]
-E_stop_1to1 = 3.26
-E_stop_2to1 = 5.85
+st.subheader("📥 Motion Inputs")
+distance_mm = st.number_input("Stroke distance per move [mm]", 1.0, 2000.0, 320.0, 1.0)
+n_moves = st.number_input("Number of moves per cycle", 1, 100, 10)
+cycle_dwell = st.number_input("Cycle dwell time [s]", 0.0, 60.0, 15.0, 0.1)
 
-# total energy per cycle
-E_cycle_1to1 = E_stop_1to1 * n_stops
-E_cycle_2to1 = E_stop_2to1 * n_stops
+# convert
+distance_m = distance_mm / 1000.0
 
-# average power
-P_avg_1to1 = E_cycle_1to1 / cycle_time
-P_avg_2to1 = E_cycle_2to1 / cycle_time
+# --------------------------------------
+# Motion profile
+# --------------------------------------
+ta, tc, td = trapezoid_times(distance_m, params["vmax"], params["accel"])
+t_move = ta + tc + td
+t_cycle = n_moves*t_move + cycle_dwell
 
-# peak power
-P_peak_1to1 = E_stop_1to1 / brake_time
-P_peak_2to1 = E_stop_2to1 / brake_time
+# Kinetic energy of payload + carriage
+M = params["payload_kg"] + params["carriage_kg"]
+vmax = params["vmax"]
+E_kin = 0.5*M*vmax**2   # Joules
 
-# ------------------------
-# Build simplified regen profile (time series)
-# ------------------------
-time_points = [0]
-power_1to1 = [0]
-power_2to1 = [0]
+# regen per stop (assume nearly all KE returned)
+E_stop = E_kin * params["screw_eta"]
 
-t = 0.0
-for i in range(n_stops):
-    # braking event
-    t += 1.0   # move + accel time placeholder
-    time_points.append(t)
-    power_1to1.append(P_peak_1to1)
-    power_2to1.append(P_peak_2to1)
+# total cycle energy
+E_cycle = E_stop * n_moves
+P_avg = E_cycle / t_cycle
+P_peak = E_stop / td if td > 0 else E_stop / ta
 
-    t += brake_time
-    time_points.append(t)
-    power_1to1.append(0)
-    power_2to1.append(0)
+# --------------------------------------
+# Resistor thresholds (AKD typical)
+# --------------------------------------
+P_cont_limit = 100.0   # W continuous
+P_peak_limit = 1000.0  # W peak (short bursts)
 
-# extend to full cycle time
-time_points.append(cycle_time)
-power_1to1.append(0)
-power_2to1.append(0)
+# --------------------------------------
+# Display results
+# --------------------------------------
+st.subheader("📊 Results")
 
-# ------------------------
-# ECharts options
-# ------------------------
-options = {
-    "tooltip": {"trigger": "axis"},
-    "legend": {"data": ["1:1 Direct Drive", "2:1 Reducer"]},
-    "xAxis": {"type": "value", "name": "Time [s]"},
-    "yAxis": {"type": "value", "name": "Power [W]"},
-    "series": [
-        {
-            "name": "1:1 Direct Drive",
-            "type": "line",
-            "step": "end",
-            "data": [[time_points[i], power_1to1[i]] for i in range(len(time_points))],
-        },
-        {
-            "name": "2:1 Reducer",
-            "type": "line",
-            "step": "end",
-            "data": [[time_points[i], power_2to1[i]] for i in range(len(time_points))],
-        },
-    ],
-}
+col1, col2, col3 = st.columns(3)
+col1.metric("Energy per stop", f"{E_stop:.2f} J")
+col2.metric("Total per cycle", f"{E_cycle:.1f} J")
+col3.metric("Cycle time", f"{t_cycle:.2f} s")
 
-st.subheader("📊 Regeneration Power vs. Time")
-st_echarts(options=options, height="400px")
+col4, col5 = st.columns(2)
+col4.metric("Average Regen Power", f"{P_avg:.2f} W")
+col5.metric("Peak Regen Power", f"{P_peak:.1f} W")
 
-# ------------------------
-# Summary
-# ------------------------
-st.subheader("🔎 Summary")
+st.subheader("✅ Safety Check")
+if P_avg < P_cont_limit and P_peak < P_peak_limit:
+    st.success("Internal resistor is sufficient. No external resistor required.")
+else:
+    st.error("⚠️ External resistor may be needed. Check drive datasheet.")
 
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown("### 1:1 Direct Drive")
-    st.write(f"- Energy per stop: **{E_stop_1to1:.2f} J**")
-    st.write(f"- Cycle energy: **{E_cycle_1to1:.1f} J**")
-    st.write(f"- Avg power: **{P_avg_1to1:.2f} W**")
-    st.write(f"- Peak power: **{P_peak_1to1:.1f} W**")
-
-with col2:
-    st.markdown("### 2:1 Reducer")
-    st.write(f"- Energy per stop: **{E_stop_2to1:.2f} J**")
-    st.write(f"- Cycle energy: **{E_cycle_2to1:.1f} J**")
-    st.write(f"- Avg power: **{P_avg_2to1:.2f} W**")
-    st.write(f"- Peak power: **{P_peak_2to1:.1f} W**")
-
-st.success("""
-**Conclusion:**  
-Both cases are far below the AKD internal resistor capacity (100 W continuous, >1 kW peak).  
-No external resistor required.
-""")
+# --------------------------------------
+# Details
+# --------------------------------------
+with st.expander("Show Detailed Calculations"):
+    st.write(f"- Accel time: {ta:.3f} s")
+    st.write(f"- Cruise time: {tc:.3f} s")
+    st.write(f"- Decel time: {td:.3f} s")
+    st.write(f"- Move time: {t_move:.3f} s")
+    st.write(f"- Kinetic energy (axis+load): {E_kin:.2f} J")
+    st.write(f"- Screw efficiency: {params['screw_eta']:.2f}")
+    st.write(f"- Energy recovered per stop: {E_stop:.2f} J")
+    st.write(f"- Total energy per cycle: {E_cycle:.1f} J")
+    st.write(f"- Average regen power: {P_avg:.2f} W")
+    st.write(f"- Peak regen power: {P_peak:.1f} W")
